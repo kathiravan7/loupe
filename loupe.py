@@ -7,7 +7,6 @@
 3. Réponse affichée dans un pop-up + copiée dans le presse-papiers
 """
 import base64
-import json
 import os
 import re
 import subprocess
@@ -35,13 +34,18 @@ SYSTEM = (
 )
 
 
-def osascript(script: str) -> str:
-    r = subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True, text=True)
+def osascript(script: str, *args: str) -> str:
+    """Exécute un AppleScript. Les textes variables passent par `args` (item n of argv),
+    jamais insérés dans le script : AppleScript ne comprend pas les échappements
+    JSON comme \\u00e9, ce qui faisait échouer en silence tout texte accentué."""
+    if args:
+        script = f"on run argv\n{script}\nend run"
+    r = subprocess.run(["/usr/bin/osascript", "-e", script, *args], capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
 def notify(msg: str) -> None:
-    osascript(f'display notification {json.dumps(msg)} with title "Loupe"')
+    osascript('display notification (item 1 of argv) with title "Loupe"', msg)
 
 
 def get_api_key() -> str | None:
@@ -92,7 +96,8 @@ def open_in_lens(image_path: str) -> bool:
     """
     copied = subprocess.run(
         ["/usr/bin/osascript", "-e",
-         f"set the clipboard to (read (POSIX file {json.dumps(image_path)}) as «class PNGf»)"],
+         "on run argv\nset the clipboard to (read (POSIX file (item 1 of argv)) as «class PNGf»)\nend run",
+         image_path],
         capture_output=True,
     ).returncode == 0
     if not copied:
@@ -143,8 +148,9 @@ def show(answer: str, title: str) -> None:
     if len(shown) > MAX_POPUP_CHARS:
         shown = shown[:MAX_POPUP_CHARS].rstrip() + "…\n\n(Réponse complète dans le presse-papiers)"
     osascript(
-        f"display dialog {json.dumps(shown)} with title {json.dumps('Loupe — ' + title)} "
-        f'buttons {{"OK"}} default button "OK" with icon note'
+        'display dialog (item 1 of argv) with title (item 2 of argv) '
+        'buttons {"OK"} default button "OK" with icon note',
+        shown, "Loupe — " + title,
     )
 
 
@@ -181,7 +187,7 @@ def main() -> int:
         osascript('display alert "Loupe" message "Impossible de joindre l\'API (connexion internet ?)."')
         return 1
     except anthropic.APIStatusError as e:
-        osascript(f'display alert "Loupe" message {json.dumps(f"Erreur API {e.status_code} : {e.message}")}')
+        osascript('display alert "Loupe" message (item 1 of argv)', f"Erreur API {e.status_code} : {e.message}")
         return 1
     show(answer, "Analyse rapide" if quick else question)
     os.remove(image)
