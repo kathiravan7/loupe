@@ -2,7 +2,8 @@
 """Loupe : sélectionnez une zone de l'écran, Claude l'analyse.
 
 1. Sélection d'une zone à la souris (outil de capture macOS, Échap pour annuler)
-2. Pop-up : Entrée = analyse rapide, ou taper une question
+2. Pop-up : Entrée = analyse rapide, ou taper une question,
+   ou bouton « Google Lens » (capture copiée + Google Lens ouvert dans le navigateur)
 3. Réponse affichée dans un pop-up + copiée dans le presse-papiers
 """
 import base64
@@ -22,6 +23,8 @@ QUICK_PROMPT = (
     "Analyse rapide : en quelques lignes, dis ce que montre cette zone et "
     "l'information essentielle à en retenir."
 )
+LENS_BUTTON = "Google Lens"
+LENS_URL = "https://lens.google.com/"
 MAX_POPUP_CHARS = 1500  # au-delà, le pop-up tronque (texte complet dans le presse-papiers)
 SYSTEM = (
     "Tu es une loupe intelligente. L'utilisateur a sélectionné une zone de son écran. "
@@ -61,19 +64,42 @@ def capture() -> str | None:
     return path
 
 
-def ask_question() -> str | None:
-    """Renvoie la question tapée, "" si Entrée sur un champ vide, None si Annuler/Échap."""
+def ask_question() -> tuple[str, str] | None:
+    """Renvoie (bouton, question tapée) ; question "" si Entrée sur un champ vide.
+
+    None si Annuler/Échap.
+    """
     r = subprocess.run(
         ["/usr/bin/osascript", "-e",
          'set r to display dialog "Entrée = analyse rapide\nou tapez une question :" '
          'default answer "" with title "Loupe" '
-         'buttons {"Annuler", "Analyser"} default button "Analyser" cancel button "Annuler"\n'
-         'return text returned of r'],
+         f'buttons {{"Annuler", "{LENS_BUTTON}", "Analyser"}} '
+         'default button "Analyser" cancel button "Annuler"\n'
+         'return (button returned of r) & linefeed & (text returned of r)'],
         capture_output=True, text=True,
     )
     if r.returncode != 0:
         return None
-    return r.stdout.strip()
+    button, _, question = r.stdout.rstrip("\n").partition("\n")
+    return button, question.strip()
+
+
+def open_in_lens(image_path: str) -> bool:
+    """Copie la capture dans le presse-papiers et ouvre Google Lens dans le navigateur.
+
+    Google n'offre pas d'API publique pour Lens : l'utilisateur colle l'image (⌘V)
+    sur la page ouverte. Renvoie False si la copie a échoué.
+    """
+    copied = subprocess.run(
+        ["/usr/bin/osascript", "-e",
+         f"set the clipboard to (read (POSIX file {json.dumps(image_path)}) as «class PNGf»)"],
+        capture_output=True,
+    ).returncode == 0
+    if not copied:
+        return False
+    subprocess.run(["/usr/bin/open", LENS_URL])
+    notify("Capture copiée : collez-la (⌘V) dans Google Lens")
+    return True
 
 
 def analyze(api_key: str, image_path: str, question: str, quick: bool) -> str:
@@ -130,9 +156,17 @@ def main() -> int:
     image = capture()
     if not image:
         return 0
-    question = ask_question()
-    if question is None:
+    choice = ask_question()
+    if choice is None:
         os.remove(image)
+        return 0
+    button, question = choice
+    if button == LENS_BUTTON:
+        ok = open_in_lens(image)
+        os.remove(image)
+        if not ok:
+            osascript('display alert "Loupe" message "Impossible de copier la capture dans le presse-papiers."')
+            return 1
         return 0
     quick = question == ""
     if quick:
